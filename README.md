@@ -1,8 +1,8 @@
 # Velor Bay — Open-World Street Story
 
-[![make.fun bounty](https://img.shields.io/badge/make.fun-bounty-gta6--01-ff5a5f)](https://make.fun/bounty/gta6-01)
-[![Velor Bay](https://img.shields.io/badge/game-Velor%20Bay-2e6fc2)](https://make.fun/bounty/gta6-01)
-[![Vanilla JS](https://img.shields.io/badge/vanilla-JS%20%7C%20zero%20deps-f2a541)](https://make.fun/bounty/gta6-01)
+[![make.fun · gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+[![rank](https://make.fun/badge/gta6-01/Liamabukcubung22/velor-bay-2/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+[![reward](https://make.fun/badge/gta6-01/Liamabukcubung22/velor-bay-2/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
 
 A top-down open-world street story in the spirit of GTA 1/2, built with
 vanilla JS, Canvas 2D and zero libraries — and zero network requests. Play it
