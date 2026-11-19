@@ -1,234 +1,242 @@
-// Six chained missions: briefing, objective steps, payout, victory.
-// Step engine: goto / enterCar / stealCar / pickup / deliver / deliverTimed /
-// killAll / escape. Each step is checked against the real world state.
-import { MISSION_DEFS, PLACES } from './config.js';
-import { createCar } from './vehicles.js';
-import { addWanted } from './police.js';
-import { spawnEnemies } from './combat.js';
+// The six-mission chain. Each mission is a list of steps; a step completes
+// when the player reaches its marker, enters the right car, or finishes its
+// fight. Completing a mission pays out, flashes the jingle, and opens the
+// next one. After mission 6 the victory screen appears.
+import { CFG } from './config.js';
+import { dist } from './random.js';
+import { spawnGang } from './combat.js';
+import { spawnParkedCar } from './vehicles.js';
 
-export function createMissions() {
+export const MISSION_NAMES = [
+  'Back in the Bay',
+  'Fare Dodger',
+  'Repo Run',
+  'Hot Cargo',
+  'The Debt Collector',
+  'The Last Score',
+];
+
+export const MISSION_BRIEFS = [
+  'Kai is back in Velor Bay. Walk to the garage and take the car waiting for you.',
+  'The cab needs a driver. Pick up 3 passengers and drop each one off.',
+  'A repo job: steal the target car and deliver it to the garage in one piece.',
+  'Hot cargo, cold nerves. Grab the package and deliver it before the timer runs out.',
+  'The debt collector is waiting in the alley with friends. Deal with them, then run.',
+  'One last score: steal the getaway car, hit the bank, and vanish to the safehouse.',
+];
+
+function loc(S, key) {
+  return S.city.locations[key];
+}
+
+function gotoStep(S, x, y, label, radius) {
+  return { type: 'goto', x, y, label, radius: radius || 46, done: false };
+}
+
+export function buildMissions(S) {
+  const L = S.city.locations;
+  const missions = [
+    {
+      name: MISSION_NAMES[0],
+      steps: [
+        gotoStep(S, L.garage.x, L.garage.y, 'Walk to the garage'),
+        { type: 'enterCar', label: 'Take the mission car', done: false },
+      ],
+    },
+    {
+      name: MISSION_NAMES[1],
+      steps: [
+        gotoStep(S, 1040, 240, 'Pick up passenger 1'),
+        gotoStep(S, 2240, 640, 'Drop off passenger 1'),
+        gotoStep(S, 640, 1440, 'Pick up passenger 2'),
+        gotoStep(S, 2640, 1440, 'Drop off passenger 2'),
+        gotoStep(S, 1840, 2240, 'Pick up passenger 3'),
+        gotoStep(S, 640, 2240, 'Drop off passenger 3'),
+      ],
+    },
+    {
+      name: MISSION_NAMES[2],
+      steps: [
+        { type: 'stealTarget', label: 'Steal the target car', done: false },
+        gotoStep(S, L.garage.x, L.garage.y, 'Deliver it to the garage, undamaged', 60),
+      ],
+    },
+    {
+      name: MISSION_NAMES[3],
+      steps: [
+        gotoStep(S, L.cargo.x, L.cargo.y, 'Pick up the cargo at the docks'),
+        { type: 'timed', label: 'Deliver before the timer runs out', x: 640, y: 1840, radius: 60, seconds: 95, done: false },
+      ],
+    },
+    {
+      name: MISSION_NAMES[4],
+      steps: [
+        gotoStep(S, L.alley.x, L.alley.y, 'Meet the collector in the alley'),
+        { type: 'fight', label: 'Deal with the gang (3)', need: 3, got: 0, done: false },
+        { type: 'escape', label: 'Escape to the safehouse', x: L.safehouse.x, y: L.safehouse.y, radius: 60, done: false },
+      ],
+    },
+    {
+      name: MISSION_NAMES[5],
+      steps: [
+        { type: 'stealTarget', label: 'Steal the getaway car', done: false },
+        gotoStep(S, L.bank.x, L.bank.y, 'Drive to Velor Bank'),
+        { type: 'grabCash', label: 'Grab the cash on foot', x: L.bank.x, y: L.bank.y, radius: 40, done: false },
+        { type: 'escape', label: 'Escape to the safehouse — wanted 4', x: L.safehouse.x, y: L.safehouse.y, radius: 60, done: false },
+      ],
+    },
+  ];
   return {
-    index: 0, stepIdx: 0, active: false,
-    timer: 0, timerMax: 0, halfFlag: false,
-    message: '', messageT: 0,
-    completeFlash: 0, lastPayout: 0, lastTitle: '',
-    failed: null, failedT: 0,
-    victory: false,
+    list: missions,
+    index: 0,
+    step: 0,
+    timer: 0,
+    targetCar: null,
+    cashTaken: false,
+
+    current() {
+      return this.list[this.index] || null;
+    },
+    currentStep() {
+      const m = this.current();
+      return m ? m.steps[this.step] || null : null;
+    },
+    marker() {
+      const st = this.currentStep();
+      if (!st) return null;
+      if (st.type === 'stealTarget') return this.targetCar ? { x: this.targetCar.x, y: this.targetCar.y } : null;
+      if (st.type === 'enterCar') return { x: S.missionCar.x, y: S.missionCar.y };
+      if (st.x !== undefined) return { x: st.x, y: st.y };
+      return null;
+    },
+    label() {
+      const m = this.current();
+      if (!m) return 'Free roam — enjoy Velor Bay';
+      const st = this.currentStep();
+      return (this.index + 1) + '. ' + m.name + ' — ' + (st ? st.label : 'done');
+    },
+
+    startMission(S2, i) {
+      this.index = i;
+      this.step = 0;
+      this.timer = 0;
+      this.cashTaken = false;
+      const m = this.list[i];
+      S2.hudFlash('MISSION ' + (i + 1) + ': ' + m.name);
+      S2.audio.jingle();
+      if (i === 2 || i === 5) {
+        // Repo / getaway target car, parked near the docks.
+        const car = spawnParkedCar(S2.rng, S2.city, false);
+        car.x = 2600;
+        car.y = 600;
+        car.target = true;
+        car.color = '#d8d8d8';
+        this.targetCar = car;
+        S2.parkedCars.push(car);
+      }
+      if (i === 3) this.timer = 95;
+    },
+
+    completeStep(S2) {
+      const st = this.currentStep();
+      if (!st) return;
+      st.done = true;
+      this.step += 1;
+      S2.audio.pickup();
+      const m = this.current();
+      if (m && this.step >= m.steps.length) this.completeMission(S2);
+    },
+
+    completeMission(S2) {
+      const m = this.current();
+      const pay = CFG.payouts[this.index] || 500;
+      S2.money += pay;
+      S2.stats.earned = (S2.stats.earned || 0) + pay;
+      S2.missionsDone = this.index + 1;
+      S2.showMissionComplete(m.name, pay);
+      S2.audio.jingle();
+      S2.saveNow();
+      if (this.index >= this.list.length - 1) {
+        S2.victoryPending = true;
+        return;
+      }
+      this.startMission(S2, this.index + 1);
+    },
+
+    onEnterCar(S2, car) {
+      const st = this.currentStep();
+      if (!st) return;
+      if (st.type === 'enterCar' && car.mission) this.completeStep(S2);
+      if (st.type === 'stealTarget' && car.target) {
+        this.completeStep(S2);
+        if (this.index === 5) S2.addWanted(1, 'getaway car');
+      }
+    },
+    onExitCar(S2, car) {
+      const st = this.currentStep();
+      if (!st) return;
+      if (st.type === 'grabCash' && !S2.player.inCar) {
+        // Cash grab happens on foot at the bank (handled in update).
+      }
+    },
+    onKill(S2, e) {
+      const st = this.currentStep();
+      if (st && st.type === 'fight') {
+        st.got = (st.got || 0) + 1;
+        if (st.got >= st.need) this.completeStep(S2);
+      }
+    },
+
+    update(S2, dt) {
+      const m = this.current();
+      if (!m) return;
+      const st = this.currentStep();
+      if (!st) return;
+      const px = S2.playerCar ? S2.playerCar.x : S2.player.x;
+      const py = S2.playerCar ? S2.playerCar.y : S2.player.y;
+      if (st.type === 'goto' || st.type === 'escape') {
+        if (dist(px, py, st.x, st.y) < st.radius) {
+          if (st.type === 'escape' && this.index === 5) {
+            // Last escape ends the chain.
+          }
+          this.completeStep(S2);
+        }
+      } else if (st.type === 'timed') {
+        this.timer -= dt;
+        if (this.timer <= 0) {
+          S2.hudFlash('TOO SLOW — MISSION FAILED, TRY AGAIN');
+          S2.audio.fail();
+          this.startMission(S2, this.index);
+          return;
+        }
+        if (dist(px, py, st.x, st.y) < st.radius) this.completeStep(S2);
+      } else if (st.type === 'grabCash') {
+        if (!S2.player.inCar && dist(S2.player.x, S2.player.y, st.x, st.y) < st.radius) {
+          this.cashTaken = true;
+          S2.wanted = 4;
+          S2.policeCars.length = 0;
+          S2.hudFlash('CASH GRABBED — WANTED 4★ — RUN!');
+          S2.audio.jingle();
+          this.completeStep(S2);
+        }
+      } else if (st.type === 'fight') {
+        if (!st.spawned) {
+          st.spawned = true;
+          S2.addWanted(2, 'alley fight');
+          spawnGang(S2, S2.city.locations.alley.x, S2.city.locations.alley.y, 3, 60);
+        }
+      }
+      // Mid-mission heat for Hot Cargo.
+      if (this.index === 3 && this.step === 1 && !st.heatSet) {
+        st.heatSet = true;
+        S2.addWanted(2, 'hot cargo');
+        S2.hudFlash('HEAT IS ON — WANTED 2★');
+      }
+      // Mission 5 escape sets wanted 3 when the fight ends.
+      if (this.index === 4 && this.step === 2 && !st.heatSet) {
+        st.heatSet = true;
+        S2.addWanted(1, 'escape');
+      }
+    },
   };
-}
-
-export function currentDef(m) {
-  return m.index >= 0 && m.index < MISSION_DEFS.length ? MISSION_DEFS[m.index] : null;
-}
-
-export function currentStep(m) {
-  const def = currentDef(m);
-  return def ? def.steps[m.stepIdx] : null;
-}
-
-export function objectiveText(m) {
-  if (m.victory) return 'Free roam — Velor Bay is yours';
-  const step = currentStep(m);
-  if (!step) return '';
-  let text = step.text;
-  if (step.type === 'killAll') {
-    const left = m.enemiesLeft ?? step.count;
-    text = `Deal with the collectors (${step.count - left}/${step.count})`;
-  }
-  if (m.timer > 0 && (step.type === 'deliverTimed' || step.type === 'pickup')) {
-    text += ` — ${Math.ceil(m.timer)}s`;
-  }
-  return text;
-}
-
-export function missionMarker(m, S) {
-  const step = currentStep(m);
-  if (!step || !step.at) return null;
-  if (step.type === 'killAll') return { x: PLACES.debtSpot.x, y: PLACES.debtSpot.y };
-  if (step.type === 'escape') {
-    return m.index === 5 ? { x: PLACES.safehouse.x, y: PLACES.safehouse.y } : null;
-  }
-  return step.at;
-}
-
-function spawnMissionCar(S, type, x, y, tag) {
-  const car = createCar(type, x, y, -Math.PI / 2, { owner: 'mission', missionCar: true });
-  car.missionTag = tag;
-  car.wasCivilian = false;
-  S.cars.push(car);
-  return car;
-}
-
-function setupStep(m, S) {
-  const step = currentStep(m);
-  if (!step) return;
-  const def = currentDef(m);
-  if (step.type === 'enterCar' && step.car === 'mission') {
-    if (!S.cars.some((c) => c.missionTag === 'mission')) {
-      spawnMissionCar(S, 'sedan', PLACES.garage.x + 40, PLACES.garage.y, 'mission');
-    }
-  } else if (step.type === 'enterCar' && step.car === 'taxi') {
-    if (!S.cars.some((c) => c.missionTag === 'taxi')) {
-      spawnMissionCar(S, 'taxi', PLACES.taxiStand.x + 40, PLACES.taxiStand.y, 'taxi');
-    }
-  } else if (step.type === 'stealCar' && step.car === 'sports') {
-    if (!S.cars.some((c) => c.missionTag === 'sports')) {
-      const car = createCar('sports', PLACES.repoSpot.x + 40, PLACES.repoSpot.y, 0, { owner: 'civilian' });
-      car.missionTag = 'sports';
-      car.wasCivilian = true; // stealing the repo target raises wanted, like any theft
-      S.cars.push(car);
-    }
-  } else if (step.type === 'killAll') {
-    if (S.combat.enemies.length === 0) {
-      spawnEnemies(S.combat, S.rng, PLACES.debtSpot.x, PLACES.debtSpot.y, step.count);
-    }
-    m.enemiesLeft = step.count;
-  } else if (step.type === 'pickup' && step.timed) {
-    m.timer = step.timed; m.timerMax = step.timed;
-  } else if (step.type === 'deliverTimed') {
-    if (m.timer <= 0) { m.timer = step.time; m.timerMax = step.time; }
-  }
-  m.message = `${def.title} — ${step.text}`;
-  m.messageT = 4;
-}
-
-export function startMission(m, idx, S) {
-  m.index = idx;
-  m.stepIdx = 0;
-  m.active = true;
-  m.timer = 0; m.halfFlag = false;
-  m.failed = null;
-  setupStep(m, S);
-}
-
-function advance(m, S) {
-  m.stepIdx += 1;
-  const def = currentDef(m);
-  if (m.stepIdx >= def.steps.length) {
-    completeMission(m, S);
-    return;
-  }
-  setupStep(m, S);
-}
-
-function completeMission(m, S) {
-  const def = currentDef(m);
-  let payout = def.payout;
-  if (def.id === 3 && S.player.inCar && S.player.inCar.hp < 50) payout = Math.floor(payout / 2);
-  S.player.money += payout;
-  S.stats.moneyEarned += payout;
-  S.stats.missionsDone += 1;
-  m.lastPayout = payout;
-  m.lastTitle = def.title;
-  m.completeFlash = 5;
-  m.active = false;
-  if (m.index >= MISSION_DEFS.length - 1) {
-    m.victory = true;
-    m.index = -1;
-  } else {
-    m.index += 1;
-    m.stepIdx = 0;
-    setupStep(m, S);
-    m.active = true;
-  }
-}
-
-function failMission(m, S, reason) {
-  m.failed = reason;
-  m.failedT = 4;
-  m.timer = 0;
-  // Restart the same mission fresh.
-  m.stepIdx = 0;
-  setupStep(m, S);
-}
-
-function distTo(p, at) { return Math.hypot(p.x - at.x, p.y - at.y); }
-
-export function updateMissions(m, dt, S, audio) {
-  const events = [];
-  if (m.messageT > 0) m.messageT -= dt;
-  if (m.failedT > 0) m.failedT -= dt;
-  if (m.completeFlash > 0) m.completeFlash -= dt;
-  if (!m.active || m.victory) return events;
-  const step = currentStep(m);
-  if (!step) return events;
-  const p = S.player;
-
-  // Timed steps count down.
-  if ((step.type === 'deliverTimed' || (step.type === 'pickup' && step.timed)) && m.timer > 0) {
-    m.timer -= dt;
-    if (step.type === 'deliverTimed' && !m.halfFlag && m.timer < m.timerMax / 2) {
-      m.halfFlag = true;
-      addWanted(S.police, 2, 'hot-cargo-tip');
-      m.message = 'Tipped off! Police are on you — keep driving!';
-      m.messageT = 4;
-      audio.jingle(false);
-    }
-    if (m.timer <= 0) {
-      failMission(m, S, 'Time ran out — the cargo went cold.');
-      events.push({ type: 'failed', reason: m.failed });
-      return events;
-    }
-  }
-
-  let done = false;
-  switch (step.type) {
-    case 'goto':
-      done = distTo(p, step.at) < 70;
-      break;
-    case 'enterCar':
-      if (p.inCar) {
-        if (step.car === 'any') done = true;
-        else done = p.inCar.missionTag === step.car;
-      }
-      break;
-    case 'stealCar':
-      if (p.inCar) {
-        if (step.car === 'any') done = !!p.inCar.wasCivilian;
-        else done = p.inCar.missionTag === step.car;
-      }
-      break;
-    case 'pickup':
-      if (step.onFoot) done = !p.inCar && distTo(p, step.at) < 70;
-      else done = distTo(p, step.at) < 80;
-      if (done && m.index === 5) addWanted(S.police, 4, 'bank-score'); // grab the cash, trip the alarm
-      break;
-    case 'deliver':
-      done = !!p.inCar && distTo(p, step.at) < 100;
-      break;
-    case 'deliverTimed':
-      done = !!p.inCar && distTo(p, step.at) < 100;
-      if (done) m.timer = 0;
-      break;
-    case 'killAll': {
-      const left = S.combat.enemies.filter((e) => e.hp > 0).length;
-      m.enemiesLeft = left;
-      if (left === 0) {
-        done = true;
-        if (m.index === 4) addWanted(S.police, 3, 'debt-collector');
-      }
-      break;
-    }
-    case 'escape':
-      if (m.index === 4) {
-        done = !!p.inCar && distTo(p, PLACES.debtSpot) > 600;
-      } else {
-        done = distTo(p, PLACES.safehouse) < 100;
-      }
-      break;
-    default:
-      break;
-  }
-  if (done) {
-    audio.blip();
-    const wasLast = m.stepIdx >= currentDef(m).steps.length - 1;
-    advance(m, S);
-    events.push({ type: 'step' });
-    if (wasLast) {
-      audio.jingle(true);
-      events.push({ type: 'missionComplete', title: m.lastTitle, payout: m.lastPayout });
-      if (m.victory) events.push({ type: 'victory' });
-    }
-  }
-  return events;
 }

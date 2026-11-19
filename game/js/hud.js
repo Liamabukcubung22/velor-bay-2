@@ -1,160 +1,134 @@
-// HUD: money, health, ammo, wanted stars, clock, district, objective bar,
-// and a live minimap (player, cops, mission marker, traffic dots).
-import { WORLD_W, WORLD_H, DISTRICTS } from './config.js';
-import { districtAt } from './city.js';
-import { objectiveText, missionMarker, currentDef } from './missions.js';
+// HUD and live minimap, drawn on the main canvas: money, health, ammo,
+// wanted stars, clock, district, current objective, and a minimap with the
+// player, police, mission marker and traffic dots.
+import { CFG, clockString, districtAt } from './config.js';
 
-const MM = 168; // minimap size
+function stars(n) {
+  let s = '';
+  for (let i = 0; i < CFG.maxWanted; i++) s += i < n ? '★' : '☆';
+  return s;
+}
 
-export function drawHUD(ctx, S, viewW, viewH) {
+export function drawHud(S, ctx, viewW, viewH) {
   const p = S.player;
-  const m = S.missions;
   ctx.save();
-  ctx.textBaseline = 'top';
-
   // Top-left: money + health + ammo.
-  ctx.fillStyle = 'rgba(8,10,14,0.88)';
-  ctx.fillRect(12, 12, 250, 86);
-  ctx.fillStyle = '#ffd94a';
-  ctx.font = 'bold 26px monospace';
-  ctx.fillText(`$${Math.floor(p.money)}`, 24, 20);
-  ctx.fillStyle = '#e8e8e8';
-  ctx.font = '15px monospace';
-  ctx.fillText(`AMMO ${p.ammo}`, 24, 56);
-  // Health bar.
-  ctx.fillStyle = '#333';
-  ctx.fillRect(120, 58, 120, 12);
-  ctx.fillStyle = p.hp > 35 ? '#4fd06a' : '#e84a4a';
-  ctx.fillRect(120, 58, Math.max(0, 120 * p.hp / 100), 12);
-  ctx.fillStyle = '#fff';
-  ctx.fillText(`HP ${Math.ceil(p.hp)}`, 120, 74);
-
-  // Wanted stars, top centre.
-  const cx = viewW / 2;
-  ctx.fillStyle = 'rgba(8,10,14,0.88)';
-  ctx.fillRect(cx - 110, 12, 220, 40);
-  for (let i = 0; i < 5; i += 1) {
-    ctx.fillStyle = i < S.police.wanted ? '#ffd94a' : 'rgba(255,255,255,0.25)';
-    ctx.font = '26px sans-serif';
-    ctx.fillText('★', cx - 100 + i * 42, 16);
-  }
-
-  // Clock + district, top-right above minimap.
-  const hh = 8 + Math.floor(S.time / 3600) % 24;
-  const mm = Math.floor(S.time / 60) % 60;
-  ctx.fillStyle = 'rgba(8,10,14,0.88)';
-  ctx.fillRect(viewW - MM - 24, 12, MM + 12, 30);
-  ctx.fillStyle = '#fff';
-  ctx.font = 'bold 16px monospace';
-  ctx.textAlign = 'right';
-  ctx.fillText(`${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}  ${districtAt(p.x, p.y)}`, viewW - 20, 18);
+  ctx.fillStyle = 'rgba(10,12,16,0.72)';
+  ctx.fillRect(10, 10, 250, 86);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 24px system-ui, sans-serif';
   ctx.textAlign = 'left';
+  ctx.fillText('$' + S.money, 22, 38);
+  ctx.font = '15px system-ui, sans-serif';
+  ctx.fillStyle = '#7dff8a';
+  ctx.fillText('♥ ' + Math.round(p.health) + ' / 100', 22, 62);
+  ctx.fillStyle = '#ffd76a';
+  ctx.fillText('AMMO ' + p.ammo, 130, 62);
+  ctx.fillStyle = '#9fd8ff';
+  ctx.fillText(clockString(S.time / 60) + '  •  ' + districtAt(p.x, p.y), 22, 86);
 
-  // Objective bar, bottom-left.
-  const def = currentDef(m);
-  const obj = objectiveText(m);
-  if (obj) {
-    ctx.fillStyle = 'rgba(8,10,14,0.88)';
-    const w = Math.min(560, 24 + ctx.measureText(obj).width + 180);
-    ctx.fillRect(12, viewH - 58, w, 46);
-    ctx.fillStyle = '#ffd94a';
-    ctx.font = 'bold 15px monospace';
-    ctx.fillText(def ? `MISSION ${def.id}: ${def.title}` : 'FREE ROAM', 24, viewH - 50);
-    ctx.fillStyle = '#fff';
-    ctx.font = '15px monospace';
-    ctx.fillText(obj, 24, viewH - 30);
-  }
+  // Top-right: wanted stars.
+  ctx.fillStyle = 'rgba(10,12,16,0.72)';
+  ctx.fillRect(viewW - 210, 10, 200, 44);
+  ctx.fillStyle = S.wanted > 0 ? '#ffd23e' : '#8a8a8a';
+  ctx.font = 'bold 24px system-ui, sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillText(stars(S.wanted), viewW - 22, 40);
 
-  // Mission message toast.
-  if (m.messageT > 0 && m.message) {
-    ctx.fillStyle = 'rgba(8,10,14,0.72)';
-    ctx.fillRect(viewW / 2 - 300, viewH - 130, 600, 40);
-    ctx.fillStyle = '#ffe9a8';
-    ctx.font = '16px monospace';
+  // Bottom-left: current objective.
+  ctx.fillStyle = 'rgba(10,12,16,0.72)';
+  const obj = S.missions.label();
+  ctx.font = '15px system-ui, sans-serif';
+  const w = ctx.measureText('▶ ' + obj).width + 24;
+  ctx.fillRect(10, viewH - 46, w, 34);
+  ctx.fillStyle = '#ffe08a';
+  ctx.textAlign = 'left';
+  ctx.fillText('▶ ' + obj, 22, viewH - 23);
+
+  // Mission timer, when one is running.
+  const st = S.missions.currentStep();
+  if (st && st.type === 'timed') {
+    ctx.fillStyle = 'rgba(120,20,20,0.8)';
+    ctx.fillRect(viewW / 2 - 90, 10, 180, 36);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 20px system-ui, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText(m.message, viewW / 2, viewH - 118);
-    ctx.textAlign = 'left';
-  }
-  if (m.failedT > 0 && m.failed) {
-    ctx.fillStyle = 'rgba(120,10,10,0.8)';
-    ctx.fillRect(viewW / 2 - 300, viewH - 130, 600, 40);
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 16px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText(`MISSION FAILED — ${m.failed}`, viewW / 2, viewH - 118);
-    ctx.textAlign = 'left';
-  }
-  if (S.police.resprayMsg > 0) {
-    ctx.fillStyle = '#9fe8a8';
-    ctx.font = 'bold 16px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('RESPRAY — heat wiped clean ($150)', viewW / 2, 64);
-    ctx.textAlign = 'left';
+    ctx.fillText('⏱ ' + Math.max(0, Math.ceil(S.missions.timer)) + 's', viewW / 2, 35);
   }
 
-  // Minimap.
-  const mx = viewW - MM - 12, my = 52;
-  const scale = MM / WORLD_W;
-  ctx.fillStyle = 'rgba(8,12,16,0.78)';
-  ctx.fillRect(mx - 4, my - 4, MM + 8, MM + 8);
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(mx, my, MM, MM);
-  ctx.clip();
-  ctx.fillStyle = '#1d2b1d';
-  ctx.fillRect(mx, my, MM, MM);
-  // Water / beach strip.
-  ctx.fillStyle = '#2a6f8f';
-  ctx.fillRect(mx + 3060 * scale, my, MM - 3060 * scale, MM);
-  ctx.fillStyle = '#c2a878';
-  ctx.fillRect(mx + 3000 * scale, my, 60 * scale, MM);
-  // Roads.
-  ctx.strokeStyle = '#3d3d46';
-  ctx.lineWidth = 3;
-  for (const l of [200, 600, 1000, 1400, 1800, 2200, 2600, 3000]) {
-    ctx.beginPath(); ctx.moveTo(mx + l * scale, my); ctx.lineTo(mx + l * scale, my + MM); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(mx, my + l * scale); ctx.lineTo(mx + MM, my + l * scale); ctx.stroke();
+  // Flash message centre-top.
+  if (S.flashText && S.flashT > 0) {
+    ctx.globalAlpha = Math.min(1, S.flashT);
+    ctx.fillStyle = 'rgba(10,12,16,0.8)';
+    ctx.font = 'bold 18px system-ui, sans-serif';
+    const fw = ctx.measureText(S.flashText).width + 32;
+    ctx.fillRect(viewW / 2 - fw / 2, 58, fw, 34);
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.fillText(S.flashText, viewW / 2, 81);
+    ctx.globalAlpha = 1;
   }
-  // Districts tint.
-  ctx.fillStyle = 'rgba(255,255,255,0.05)';
-  ctx.fillRect(mx, my, MM / 2, MM / 2);
-  // Mission marker (pulsing).
-  const marker = missionMarker(m, S);
-  if (marker) {
-    const pulse = 5 + Math.sin(S.time * 6) * 2;
-    ctx.fillStyle = '#ffd94a';
-    ctx.beginPath();
-    ctx.arc(mx + marker.x * scale, my + marker.y * scale, pulse, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#111';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-  }
-  // Traffic dots.
-  ctx.fillStyle = '#9aa4b0';
-  for (const c of S.traffic) ctx.fillRect(mx + c.x * scale - 1, my + c.y * scale - 1, 2, 2);
-  // Cops (red-blue).
-  for (const c of S.police.cops) {
-    ctx.fillStyle = Math.floor(S.time * 4) % 2 ? '#ff4a4a' : '#4a7dff';
-    ctx.beginPath();
-    ctx.arc(mx + c.x * scale, my + c.y * scale, 3.5, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  // Player (white triangle).
-  ctx.fillStyle = '#fff';
-  ctx.beginPath();
-  ctx.arc(mx + p.x * scale, my + p.y * scale, 4, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(mx - 4, my - 4, MM + 8, MM + 8);
 
   // Controls hint, bottom-right.
-  ctx.fillStyle = 'rgba(8,10,14,0.85)';
-  ctx.fillRect(viewW - 452, viewH - 34, 440, 22);
-  ctx.fillStyle = '#c8c8c8';
-  ctx.font = '12px monospace';
-  ctx.fillText('WASD move/drive · E enter · F exit · P pause · M mute', viewW - 444, viewH - 28);
+  ctx.fillStyle = 'rgba(10,12,16,0.55)';
+  ctx.fillRect(viewW - 330, viewH - 46, 320, 34);
+  ctx.fillStyle = '#cfd8dc';
+  ctx.font = '13px system-ui, sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillText('WASD move/drive • E enter car • Click shoot • P pause', viewW - 22, viewH - 23);
+
+  drawMinimap(S, ctx, viewW, viewH);
   ctx.restore();
+}
+
+function drawMinimap(S, ctx, viewW, viewH) {
+  const size = 168;
+  const x0 = viewW - size - 12;
+  const y0 = viewH - size - 58;
+  const sx = size / CFG.worldW;
+  const sy = size / CFG.worldH;
+  ctx.fillStyle = 'rgba(10,14,18,0.78)';
+  ctx.fillRect(x0 - 4, y0 - 4, size + 8, size + 8);
+  ctx.fillStyle = '#233026';
+  ctx.fillRect(x0, y0, size, size);
+  // Roads.
+  ctx.fillStyle = '#5a5e66';
+  for (const rx of S.city.xs) ctx.fillRect(x0 + rx * sx - 1, y0, 2, size);
+  for (const ry of S.city.ys) ctx.fillRect(x0, y0 + ry * sy, size, 2);
+  // Beach.
+  ctx.fillStyle = '#2e6f8e';
+  ctx.fillRect(x0 + 3064 * sx, y0, size - 3064 * sx, size);
+  // Mission marker (pulsing yellow diamond).
+  const mk = S.missions.marker();
+  if (mk) {
+    const pulse = 5 + 2 * Math.sin(S.time * 5);
+    ctx.fillStyle = '#ffd23e';
+    ctx.beginPath();
+    ctx.moveTo(x0 + mk.x * sx, y0 + mk.y * sy - pulse);
+    ctx.lineTo(x0 + mk.x * sx + pulse, y0 + mk.y * sy);
+    ctx.lineTo(x0 + mk.x * sx, y0 + mk.y * sy + pulse);
+    ctx.lineTo(x0 + mk.x * sx - pulse, y0 + mk.y * sy);
+    ctx.closePath();
+    ctx.fill();
+  }
+  // Traffic dots.
+  ctx.fillStyle = '#c2c2c2';
+  for (const c of S.traffic) ctx.fillRect(x0 + c.x * sx - 1, y0 + c.y * sy - 1, 2, 2);
+  // Police (red/blue).
+  for (const c of S.policeCars) {
+    ctx.fillStyle = Math.floor(S.time * 6) % 2 ? '#ff4040' : '#4080ff';
+    ctx.fillRect(x0 + c.x * sx - 2, y0 + c.y * sy - 2, 4, 4);
+  }
+  // Player (white arrow).
+  const px = x0 + S.player.x * sx;
+  const py = y0 + S.player.y * sy;
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(px, py, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#ffd23e';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(px, py, 6, 0, Math.PI * 2);
+  ctx.stroke();
 }

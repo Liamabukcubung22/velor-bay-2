@@ -1,83 +1,145 @@
-// Kai Mercer on foot: WASD movement with building collision, enter/exit
-// cars, steal a civilian car (wanted +1) vs take a mission car (clean).
-import { WALK_SPEED, RUN_SPEED, PLAYER_RADIUS, START_MONEY, START_AMMO, START_HEALTH } from './config.js';
-import { collideCircle } from './city.js';
-import { addWanted } from './police.js';
+// Kai Mercer on foot: WASD walk/run, E to steal or enter a car, F to punch.
+// Entering a civilian car raises wanted; entering a mission/target car is
+// clean. The player object also carries health, ammo and the money.
+import { CFG } from './config.js';
+import { clamp, dist } from './random.js';
+import { collideBuildings, clampToWorld } from './city.js';
+import { makeCar } from './vehicles.js';
+import { combatPunch } from './combat.js';
 
-export function createPlayer(x, y) {
+export function makePlayer(x, y) {
   return {
-    x, y, angle: -Math.PI / 2,
-    hp: START_HEALTH, money: START_MONEY, ammo: START_AMMO,
-    inCar: null, moveSpeed: 0, aimAngle: -Math.PI / 2,
-    fireCooldown: 0, hurtFlash: 0, cash: 0,
+    x, y,
+    angle: -Math.PI / 2,
+    speedNow: 0,
+    health: CFG.maxHealth,
+    ammo: CFG.startAmmo,
+    hasGun: true,
+    inCar: null,
+    punchAt: 0,
+    dead: false,
   };
 }
 
-// On-foot step. Returns nothing; moves with collision + world bounds.
-export function stepOnFoot(player, dir, dt, city, cars, peds, S) {
-  let mx = dir.x, my = dir.y;
-  const len = Math.hypot(mx, my);
-  if (len > 0) { mx /= len; my /= len; }
-  const speed = dir.run ? RUN_SPEED : WALK_SPEED;
-  player.moveSpeed = len > 0 ? speed : 0;
-  if (len > 0) player.angle = Math.atan2(my, mx);
-  const nx = player.x + mx * speed * dt;
-  const ny = player.y + my * speed * dt;
-  const res = collideCircle(city, nx, ny, PLAYER_RADIUS);
-  player.x = res.x; player.y = res.y;
-  player.fireCooldown = Math.max(0, player.fireCooldown - dt);
-  player.hurtFlash = Math.max(0, player.hurtFlash - dt);
-  // Bumping a pedestrian at speed hurts them and raises heat.
-  for (const p of peds) {
-    if (Math.hypot(p.x - player.x, p.y - player.y) < 22 && player.moveSpeed > 200) {
-      p.flee = 2;
-      const a = Math.atan2(p.y - player.y, p.x - player.x);
-      p.vx = Math.cos(a) * 220; p.vy = Math.sin(a) * 220;
-      addWanted(S.police, 1, 'hit-ped');
+export function nearestCar(S, maxD) {
+  let best = null;
+  let bestD = maxD;
+  const all = [...S.parkedCars, ...S.traffic];
+  for (const c of all) {
+    if (c.driver === 'player') continue;
+    const d = dist(S.player.x, S.player.y, c.x, c.y);
+    if (d < bestD) {
+      best = c;
+      bestD = d;
     }
-  }
-}
-
-export function nearestCar(player, cars, maxDist = 70) {
-  let best = null, bd = maxDist;
-  for (const c of cars) {
-    const d = Math.hypot(c.x - player.x, c.y - player.y);
-    if (d < bd) { bd = d; best = c; }
   }
   return best;
 }
 
-// Try to enter the nearest car. Returns a result tag for HUD feedback.
-export function tryEnterCar(S, car) {
-  const player = S.player;
-  if (!car) return 'none';
-  if (car.cop) return 'cop';
-  if (car.hp <= 0) return 'wreck';
-  player.inCar = car;
-  player.x = car.x; player.y = car.y;
-  const wasPlayerCar = car.owner === 'player';
-  car.owner = 'player';
-  if (car.wasCivilian && !wasPlayerCar) {
-    addWanted(S.police, 1, 'steal');
-    S.stats.stolen += 1;
-    return 'stolen';
+export function updatePlayerOnFoot(S, dt) {
+  const p = S.player;
+  const inp = S.input;
+  let mx = 0;
+  let my = 0;
+  if (inp.isDown('KeyW') || inp.isDown('ArrowUp')) my -= 1;
+  if (inp.isDown('KeyS') || inp.isDown('ArrowDown')) my += 1;
+  if (inp.isDown('KeyA') || inp.isDown('ArrowLeft')) mx -= 1;
+  if (inp.isDown('KeyD') || inp.isDown('ArrowRight')) mx += 1;
+  // Autopilot (shots / tests): walk toward the target.
+  if (S.autoTarget && !p.inCar) {
+    const dx = S.autoTarget.x - p.x;
+    const dy = S.autoTarget.y - p.y;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    if (d > 14) {
+      mx = dx / d;
+      my = dy / d;
+    } else {
+      S.autoTarget = null;
+    }
   }
-  return 'entered';
+  const len = Math.sqrt(mx * mx + my * my);
+  const running = inp.isDown('ShiftLeft') || inp.isDown('ShiftRight') || (S.autoTarget ? true : false);
+  const speed = running ? CFG.runSpeed : CFG.walkSpeed;
+  p.speedNow = 0;
+  if (len > 0.01) {
+    p.x += (mx / len) * speed * dt;
+    p.y += (my / len) * speed * dt;
+    p.angle = Math.atan2(my, mx);
+    p.speedNow = speed;
+    S.stats.distance = (S.stats.distance || 0) + speed * dt;
+  }
+  collideBuildings(S.city, p, 12);
+  clampToWorld(p, 20);
+
+  // E: enter / steal the nearest car.
+  if (inp.takePressed('KeyE')) tryEnterCar(S);
+  // F: punch in front of the player.
+  if (inp.takePressed('KeyF')) {
+    p.punchAt = 0.25;
+    S.audio.punch();
+    combatPunch(S);
+  }
+  if (p.punchAt > 0) p.punchAt -= dt;
 }
 
-// Mark a car as a civilian car (stealing it raises wanted). Mission cars
-// are flagged missionCar and never count as stolen.
-export function flagCivilian(car) { car.wasCivilian = true; }
+export function tryEnterCar(S) {
+  const p = S.player;
+  if (p.inCar) return false;
+  const car = nearestCar(S, 52);
+  if (!car) return false;
+  return enterCar(S, car);
+}
+
+export function enterCar(S, car) {
+  const p = S.player;
+  p.inCar = car;
+  S.playerCar = car;
+  car.driver = 'player';
+  car.speed = 0;
+  S.parkedCars = S.parkedCars.filter((c) => c !== car);
+  S.traffic = S.traffic.filter((c) => c !== car);
+  if (!car.mission && !car.target) {
+    // Stealing a civilian's car is a crime.
+    car.stolen = true;
+    S.stats.stolen = (S.stats.stolen || 0) + 1;
+    S.addWanted(1, 'steal');
+    S.hudFlash('CAR STOLEN — WANTED +1★');
+  } else if (car.mission) {
+    S.hudFlash('MISSION CAR — CLEAN');
+  }
+  S.audio.pickup();
+  S.missions.onEnterCar(S, car);
+  return true;
+}
 
 export function exitCar(S) {
-  const player = S.player;
-  const car = player.inCar;
-  if (!car) return;
-  player.inCar = null;
-  const a = car.angle + Math.PI / 2;
-  player.x = car.x + Math.cos(a) * 34;
-  player.y = car.y + Math.sin(a) * 34;
-  const res = collideCircle(S.city, player.x, player.y, PLAYER_RADIUS);
-  player.x = res.x; player.y = res.y;
-  player.angle = car.angle;
+  const p = S.player;
+  if (!p.inCar) return false;
+  const car = p.inCar;
+  car.driver = null;
+  car.speed = 0;
+  p.x = car.x + Math.cos(car.angle + Math.PI / 2) * 34;
+  p.y = car.y + Math.sin(car.angle + Math.PI / 2) * 34;
+  p.inCar = null;
+  S.playerCar = null;
+  if (!S.parkedCars.includes(car)) S.parkedCars.push(car);
+  S.missions.onExitCar(S, car);
+  return true;
+}
+
+export function damagePlayer(S, amount, why) {
+  const p = S.player;
+  if (p.dead || S.screen !== 'play') return;
+  p.health = clamp(p.health - amount, 0, CFG.maxHealth);
+  S.hudFlash('−' + amount + ' HP' + (why ? ' (' + why + ')' : ''));
+  if (p.health <= 0) {
+    p.dead = true;
+    S.stats.wasted = (S.stats.wasted || 0) + 1;
+    S.audio.fail();
+    S.setScreen('wasted');
+  }
+}
+
+export function healPlayer(S, amount) {
+  S.player.health = clamp(S.player.health + amount, 0, CFG.maxHealth);
 }

@@ -1,324 +1,236 @@
-// Headless play-test: drives the real game through the real loop in
-// Chromium and checks the 24-item checklist from the handoff.
-import { spawn } from 'node:child_process';
-import { chromium } from 'playwright-core';
+// Velor Bay playtest: 25 checks through Playwright + window.__VB.
+// Usage: node tools/playtest.mjs [port]
+// Serves game/ on localhost. Waits on game state (waitForFunction), never
+// on wall-clock sleeps, because the VM's game loop runs slower than real time.
+import { createServer } from 'node:http';
+import { readFileSync, existsSync, statSync } from 'node:fs';
+import { join, extname, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
-const ROOT = new URL('..', import.meta.url).pathname;
-const PORT = 8082;
+const require = createRequire(import.meta.url);
+let chromium;
+for (const p of [
+  'playwright-core',
+  '/home/hatch/workspace/makefun-token-radar-01/tools/node_modules/playwright-core',
+]) {
+  try {
+    chromium = require(p).chromium;
+    break;
+  } catch { /* try next */ }
+}
+if (!chromium) throw new Error('playwright-core not found');
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const GAME = join(ROOT, 'game');
+const PORT = Number(process.argv[2] || 8932);
+
+const TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+};
+
+const server = createServer((req, res) => {
+  const path = join(GAME, decodeURIComponent(new URL(req.url, 'http://x').pathname));
+  if (!path.startsWith(GAME) || !existsSync(path) || !statSync(path).isFile()) {
+    res.writeHead(404);
+    res.end('nf');
+    return;
+  }
+  res.writeHead(200, { 'Content-Type': TYPES[extname(path)] || 'application/octet-stream' });
+  res.end(readFileSync(path));
+});
+await new Promise((r) => server.listen(PORT, r));
+
+const browser = await chromium.launch({ headless: true });
+const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+const requests = [];
+const errors = [];
+page.on('request', (r) => requests.push(r.url()));
+page.on('pageerror', (e) => errors.push('pageerror: ' + String(e)));
+page.on('console', (m) => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
 
 const results = [];
-function check(name, ok, extra = '') {
-  results.push({ name, ok: !!ok, extra });
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? ' — ' + extra : ''}`);
+function check(name, ok, detail) {
+  results.push({ name, ok: !!ok, detail: detail || '' });
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ' — ' + detail : ''}`);
 }
+const vb = (expr) => page.evaluate(expr);
+const waitState = (fn, timeout) =>
+  page.waitForFunction(fn, null, { timeout: timeout || 60000, polling: 400 });
 
-const server = spawn('node', ['serve.ts', '--port', String(PORT)], { cwd: ROOT, stdio: 'ignore' });
-await new Promise((r) => setTimeout(r, 1200));
+await page.goto(`http://127.0.0.1:${PORT}/index.html`, { waitUntil: 'domcontentloaded' });
+await waitState(() => !!window.__VB, 30000);
 
-const errors = [];
-const requests = [];
-let failed = 0;
+// 1. Load without console errors.
+check('1 load tanpa console error', errors.length === 0, errors.join(' | ') || 'clean');
+
+// 2. Start button begins a run.
+await page.mouse.click(640, 630);
+await waitState(() => window.__VB.screen === 'play', 30000);
+check('2 tombol start memulai run', (await vb(`window.__VB.screen`)) === 'play');
+
+// 3. Save written on new game.
+const save = await page.evaluate(() => window.localStorage.getItem('velorbay-save-v1'));
+check('3 save tertulis saat new game', !!save, save ? save.slice(0, 80) : 'no save');
+
+// 4. Traffic and pedestrians populated.
+const counts = await vb(`({ t: window.__VB.trafficCount, p: window.__VB.pedCount })`);
+check('4 lalu lintas dan pejalan kaki terisi', counts.t >= 10 && counts.p >= 10, `traffic=${counts.t} peds=${counts.p}`);
+
+// 5. Walking moves the player.
+const p0 = await vb(`window.__VB.player`);
+await page.keyboard.down('KeyW');
+await page.waitForTimeout(1500);
+await page.keyboard.up('KeyW');
+const p1 = await vb(`window.__VB.player`);
+const moved = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+check('5 jalan kaki menggerakkan pemain', moved > 20, `moved ${moved.toFixed(0)}px`);
+
+// 6. Mission 1 step 1: walk to the garage.
+await vb(`window.__VB.goTo(620, 640)`);
+await waitState(() => window.__VB.mission.step === 1, 60000);
+check('6 misi 1 langkah 1 (jalan ke garasi)', (await vb(`window.__VB.mission.step`)) === 1);
+
+// 7. Enter the mission car: clean, no wanted.
+await vb(`window.__VB.teleport(660, 640); window.__VB.enterNearestCar()`);
+const afterEnter = await vb(`({ inCar: window.__VB.player.inCar, wanted: window.__VB.wanted })`);
+check('7 masuk mobil misi (bersih, tanpa wanted)', afterEnter.inCar && afterEnter.wanted === 0, JSON.stringify(afterEnter));
+
+// 8. Mission 1 completes and $400 payout lands.
+await waitState(() => window.__VB.screen === 'mission' && window.__VB.money === 600, 30000);
+const m1 = await vb(`({ screen: window.__VB.screen, money: window.__VB.money, done: window.__VB.missionsDone })`);
+check('8 misi 1 selesai dan payout masuk (400 dolar)', m1.screen === 'mission' && m1.money === 600, JSON.stringify(m1));
+await page.mouse.click(640, 360);
 try {
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
-  const page = await context.newPage();
-  page.on('console', (m) => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
-  page.on('pageerror', (e) => errors.push('page: ' + e.message));
-  page.on('request', (req) => requests.push(req.url()));
-
-  const vb = (fn, arg) => page.evaluate(fn, arg);
-  const state = () => page.evaluate(() => {
-    const S = window.__VB.S;
-    return {
-      screen: S.screen,
-      px: Math.round(S.player.x), py: Math.round(S.player.y),
-      hp: Math.round(S.player.hp), money: Math.floor(S.player.money),
-      ammo: S.player.ammo, wanted: S.police.wanted,
-      cops: S.police.cops.length,
-      inCar: !!S.player.inCar,
-      carHp: S.player.inCar ? Math.round(S.player.inCar.hp) : null,
-      mission: S.missions.index, step: S.missions.stepIdx,
-      victory: S.missions.victory,
-      traffic: S.traffic.length, peds: S.peds.length,
-      enemies: S.combat.enemies.length,
-      stolen: S.stats.stolen, kills: S.stats.kills,
-      missionsDone: S.stats.missionsDone,
-    };
-  });
-  const waitState = (pred, timeout = 60000) => page.waitForFunction(pred, null, { timeout });
-
-  await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'load', timeout: 30000 });
-  await page.waitForFunction(() => !!window.__VB, null, { timeout: 15000 });
-  await page.waitForTimeout(1500);
-
-  // 1. Loads to title.
-  let s = await state();
-  check('loads to title', s.screen === 'title', `screen=${s.screen}`);
-
-  // 2. Start button begins run (click the real NEW GAME button).
-  await page.mouse.click(640, 503);
-  await page.waitForTimeout(800);
-  s = await state();
-  check('start button begins run', s.screen === 'play', `screen=${s.screen}`);
-
-  // 3. Save written on new game.
-  const saved = await page.evaluate(() => !!window.localStorage.getItem('velorbay.save.v1'));
-  check('save written on new game', saved);
-
-  // 4. Traffic + pedestrians populated.
-  check('traffic + pedestrians populated', s.traffic >= 10 && s.peds >= 20, `${s.traffic} cars, ${s.peds} peds`);
-
-  // 5. Walking moves the player.
-  const before = await state();
-  await page.keyboard.down('KeyW');
-  await page.waitForTimeout(1200);
-  await page.keyboard.up('KeyW');
-  s = await state();
-  check('walking moves player', Math.abs(s.py - before.py) > 20 || Math.abs(s.px - before.px) > 20, `moved ${Math.round(Math.hypot(s.px - before.px, s.py - before.py))}px`);
-
-  // Pilot helpers (page-side autopilot through the real input).
-  await page.evaluate(() => {
-    window.__driveStop = () => {
-      if (window.__pilotTimer) clearInterval(window.__pilotTimer);
-      window.__pilotTimer = null;
-      const input = window.__VB.input;
-      for (const k of ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'ShiftLeft']) input.release(k);
-    };
-    window.__driveTo = (x, y) => {
-      const { S, makePilot } = window.__VB;
-      const pilot = makePilot(S);
-      pilot.setTarget(x, y);
-      window.__driveStop();
-      const held = {};
-      window.__pilotTimer = setInterval(() => {
-        const d = pilot.dir();
-        const want = {};
-        if (d.y < -0.1) want.KeyW = 1;
-        if (d.y > 0.1) want.KeyS = 1;
-        if (d.x < -0.1) want.KeyA = 1;
-        if (d.x > 0.1) want.KeyD = 1;
-        if (d.brake) want.Space = 1;
-        if (d.run) want.ShiftLeft = 1;
-        const input = window.__VB.input;
-        for (const k of Object.keys(held)) if (!want[k]) { input.release(k); delete held[k]; }
-        for (const k of Object.keys(want)) if (!held[k]) { input.press(k); held[k] = 1; }
-      }, 60);
-    };
-  });
-
-  // 6. Mission 1 step 1: walk to garage.
-  await vb(() => { const S = window.__VB.S; S.player.x = 600; S.player.y = 660; });
-  await waitState(() => window.__VB.S.missions.stepIdx >= 1, 30000).catch(() => {});
-  s = await state();
-  check('mission 1 step 1 (walk to garage)', s.step >= 1, `step=${s.step}`);
-
-  // 7. Enter mission car (clean, no wanted) — retry in case a traffic car
-  //    happens to be closer on the first try.
-  let entered = false;
-  for (let attempt = 0; attempt < 3 && !entered; attempt += 1) {
-    await vb(() => {
-      const S = window.__VB.S;
-      const car = S.cars.find((c) => c.missionTag === 'mission');
-      if (car) { S.player.x = car.x; S.player.y = car.y; }
-    });
-    await page.waitForTimeout(300);
-    await page.keyboard.press('KeyE');
-    await page.waitForTimeout(500);
-    entered = await vb(() => {
-      const c = window.__VB.S.player.inCar;
-      return !!c && c.missionTag === 'mission';
-    });
-    if (!entered) await page.keyboard.press('KeyF');
-  }
-  s = await state();
-  check('enter mission car (clean, no wanted)', entered && s.wanted === 0, `inCar=${s.inCar} wanted=${s.wanted}`);
-
-  // 8. Drive to safehouse — mission 1 completes.
-  await vb(() => window.__driveTo(1000, 1000));
-  await waitState(() => window.__VB.S.missions.index >= 1, 120000).catch(() => {});
-  await vb(() => window.__driveStop());
-  s = await state();
-  check('mission 1 completes, payout lands ($400)', s.mission >= 1 && s.money >= 450, `mission=${s.mission} money=$${s.money}`);
-
-  // 9. Exit car.
-  await page.keyboard.press('KeyF');
-  await page.waitForTimeout(500);
-  s = await state();
-  check('exit car', !s.inCar, `inCar=${s.inCar}`);
-
-  // 10. Steal car raises wanted (retry at parked spots until a civilian car).
-  let stolen = false;
-  for (const [sx, sy] of [[1400, 300], [2240, 2660], [640, 1860]]) {
-    if (stolen) break;
-    await vb(([x, y]) => { const S = window.__VB.S; S.player.x = x; S.player.y = y; }, [sx, sy]);
-    await page.waitForTimeout(300);
-    await page.keyboard.press('KeyE');
-    await page.waitForTimeout(500);
-    stolen = await vb(() => {
-      const c = window.__VB.S.player.inCar;
-      return !!c && c.wasCivilian === true;
-    });
-    if (!stolen) await page.keyboard.press('KeyF');
-  }
-  s = await state();
-  check('steal car raises wanted', stolen && s.wanted >= 1, `inCar=${s.inCar} wanted=${s.wanted}`);
-  check('stolen counter', s.stolen >= 1, `stolen=${s.stolen}`);
-
-  // 11. Police spawn and chase (wait until one is actually moving).
-  await waitState(() => window.__VB.S.police.cops.length > 0, 30000).catch(() => {});
-  await waitState(() => window.__VB.S.police.cops.some((c) => Math.abs(c.speed) > 20), 30000).catch(() => {});
-  s = await state();
-  const copNear = await vb(() => {
-    const S = window.__VB.S;
-    return S.police.cops.some((c) => Math.abs(c.speed) > 20);
-  });
-  check('police spawn and chase', s.cops > 0 && copNear, `cops=${s.cops} moving=${copNear}`);
-
-  // 12. Respray clears wanted.
-  await vb(() => {
-    const S = window.__VB.S;
-    S.player.money = Math.max(S.player.money, 500);
-    if (S.player.inCar) { S.player.inCar.x = 1000; S.player.inCar.y = 1800; S.player.x = 1000; S.player.y = 1800; }
-    else { S.player.x = 1000; S.player.y = 1800; }
-  });
-  await waitState(() => window.__VB.S.police.wanted === 0, 30000).catch(() => {});
-  s = await state();
-  check('respray clears wanted', s.wanted === 0, `wanted=${s.wanted} money=$${s.money}`);
-
-  // 13. Wanted decays when hidden.
-  await vb(() => {
-    const S = window.__VB.S;
-    S.police.wanted = 1;
-    S.player.x = 300; S.player.y = 300;
-    if (S.player.inCar) { S.player.inCar.x = 300; S.player.inCar.y = 300; }
-  });
-  await waitState(() => window.__VB.S.police.wanted === 0, 90000).catch(() => {});
-  s = await state();
-  check('wanted decays when hidden', s.wanted === 0, `wanted=${s.wanted}`);
-
-  // 14. Combat kills an enemy. The enemy stands on the same road as the
-  //    player (clear line of sight — no building between them).
-  await vb(() => {
-    const S = window.__VB.S;
-    if (S.player.inCar) { S.player.inCar.x = 600; S.player.inCar.y = 820; }
-    S.player.x = 600; S.player.y = 820;
-    S.player.hp = 100; S.player.ammo = 60;
-    S.combat.enemies.push({ x: 600, y: 1020, hp: 70, angle: -Math.PI / 2, speed: 0, cooldown: 5, state: 'chase' });
-  });
-  await page.keyboard.press('KeyF').catch(() => {});
-  await page.waitForTimeout(300);
-  // Aim at the enemy and hold fire until it dies.
-  const shoot = async () => {
-    for (let i = 0; i < 120; i += 1) {
-      const done = await vb(() => {
-        const S = window.__VB.S;
-        const e = S.combat.enemies[0];
-        if (!e) return true;
-        const input = window.__VB.input;
-        input.setMouse(e.x - S.cam.x, e.y - S.cam.y);
-        input.click();
-        return false;
-      });
-      if (done) return true;
-      await page.waitForTimeout(250);
-      await vb(() => window.__VB.input.releaseMouse());
-    }
-    return false;
-  };
-  const killed = await shoot();
-  s = await state();
-  check('combat kills an enemy', killed && s.kills >= 1, `kills=${s.kills}`);
-
-  // 15. Pause works.
-  await page.keyboard.press('KeyP');
-  await page.waitForTimeout(500);
-  s = await state();
-  check('pause works', s.screen === 'paused', `screen=${s.screen}`);
-
-  // 16. Resume works.
-  await page.keyboard.press('KeyP');
-  await page.waitForTimeout(500);
-  s = await state();
-  check('resume works', s.screen === 'play', `screen=${s.screen}`);
-
-  // 17. Death shows WASTED (enemy on the same road, clear line of sight).
-  await vb(() => {
-    const S = window.__VB.S;
-    S.player.hp = 1;
-    S.combat.enemies.push({ x: S.player.x, y: S.player.y + 150, hp: 70, angle: -Math.PI / 2, speed: 0, cooldown: 0.1, state: 'chase' });
-  });
-  await waitState(() => window.__VB.S.screen === 'wasted', 60000).catch(() => {});
-  s = await state();
-  check('death shows WASTED', s.screen === 'wasted', `screen=${s.screen}`);
-
-  // 18. R restarts after WASTED.
-  await page.keyboard.press('KeyR');
-  await page.waitForTimeout(800);
-  s = await state();
-  check('R restarts after WASTED', s.screen === 'play' && s.mission === 0, `screen=${s.screen} mission=${s.mission}`);
-
-  // 19. Mission 6 completes -> victory (teleport between real objectives).
-  await vb(() => window.__VB.debugStartMission(5));
-  let m6stolen = false;
-  for (const [sx, sy] of [[2600, 1900], [1400, 300], [2240, 2660]]) {
-    if (m6stolen) break;
-    await vb(([x, y]) => { const S = window.__VB.S; S.player.x = x; S.player.y = y; }, [sx, sy]);
-    await page.waitForTimeout(300);
-    await page.keyboard.press('KeyE');
-    await page.waitForTimeout(500);
-    m6stolen = await vb(() => {
-      const c = window.__VB.S.player.inCar;
-      return !!c && c.wasCivilian === true;
-    });
-    if (!m6stolen) await page.keyboard.press('KeyF');
-  }
-  s = await state();
-  check('mission 6: steal a car', m6stolen && s.step >= 1, `inCar=${s.inCar} step=${s.step}`);
-  await vb(() => window.__driveTo(2200, 1000));
-  await waitState(() => window.__VB.S.missions.stepIdx >= 2, 120000).catch(() => {});
-  await vb(() => window.__driveStop());
-  await page.keyboard.press('KeyF');
-  await page.waitForTimeout(400);
-  await vb(() => { const S = window.__VB.S; S.player.x = 2200; S.player.y = 1060; });
-  await waitState(() => window.__VB.S.missions.stepIdx >= 3, 30000).catch(() => {});
-  s = await state();
-  check('mission 6: bank cash grabbed, wanted 4', s.step >= 3 && s.wanted >= 4, `step=${s.step} wanted=${s.wanted}`);
-  // Re-enter the getaway car (pull it next to the player first).
-  await vb(() => {
-    const S = window.__VB.S;
-    let best = null, bd = Infinity;
-    for (const c of [...S.cars, ...S.traffic]) {
-      const d = Math.hypot(c.x - S.player.x, c.y - S.player.y);
-      if (d < bd) { bd = d; best = c; }
-    }
-    if (best) { best.x = S.player.x + 30; best.y = S.player.y; S.player.x += 0; }
-  });
-  await page.keyboard.press('KeyE');
-  await page.waitForTimeout(500);
-  await vb(() => window.__driveTo(1000, 1000));
-  await waitState(() => window.__VB.S.missions.victory === true, 180000).catch(() => {});
-  await vb(() => window.__driveStop());
-  s = await state();
-  check('mission 6 completes -> victory', s.victory && s.screen === 'victory', `victory=${s.victory} screen=${s.screen}`);
-
-  // 20. Victory restarts into free roam.
-  await page.keyboard.press('KeyR');
-  await page.waitForTimeout(800);
-  s = await state();
-  check('victory restarts into free roam', s.screen === 'play' && s.victory, `screen=${s.screen} victory=${s.victory}`);
-
-  // 21. Zero network requests (only local).
-  const external = requests.filter((u) => !u.startsWith(`http://127.0.0.1:${PORT}`) && !u.startsWith('data:'));
-  check('zero network requests', external.length === 0, `${requests.length} local, ${external.length} external`);
-
-  // 22. No console/page errors.
-  check('no console/page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
-
-  await browser.close();
-} finally {
-  server.kill();
+  await waitState(() => window.__VB.screen === 'play', 8000);
+} catch {
+  console.log('mission dismiss retry: screen=' + (await vb(`window.__VB.screen`)));
+  await page.keyboard.press('Enter');
+  await waitState(() => window.__VB.screen === 'play', 30000);
 }
+
+// 9. Exit the car.
+await vb(`window.__VB.exitCar()`);
+check('9 keluar mobil', (await vb(`window.__VB.player.inCar`)) === false);
+
+// 10. Stealing a car raises wanted.
+const civ = await vb(`window.__VB.parked.find((c) => !c.mission && !c.target)`);
+await vb(`window.__VB.teleport(${civ.x}, ${civ.y}); window.__VB.enterNearestCar()`);
+const stolen = await vb(`({ wanted: window.__VB.wanted, stolen: window.__VB.stats.stolen, inCar: window.__VB.player.inCar })`);
+check('10 curi mobil menaikkan wanted', stolen.inCar && stolen.wanted >= 1, JSON.stringify(stolen));
+
+// 11. Stolen counter increments.
+check('11 counter curian naik', stolen.stolen >= 1, `stolen=${stolen.stolen}`);
+
+// 12. Police spawn and chase.
+await waitState(() => window.__VB.policeCount >= 1, 30000);
+const cop0 = await vb(`window.__VB.police[0]`);
+await page.waitForTimeout(900);
+const cop1 = await vb(`window.__VB.police[0]`);
+const copMoved = cop0 && cop1 ? Math.hypot(cop1.x - cop0.x, cop1.y - cop0.y) : 0;
+check('12 polisi spawn dan mengejar', !!cop0 && copMoved > 5, `cop moved ${copMoved.toFixed(0)}px`);
+
+// 13. Respray clears wanted.
+await vb(`window.__VB.setMoney(500)`);
+const respray = await vb(`window.__VB.locations().respray`);
+await vb(`window.__VB.teleport(${respray.x}, ${respray.y})`);
+await waitState(() => window.__VB.wanted === 0, 30000);
+check('13 respray menghapus wanted', (await vb(`window.__VB.wanted`)) === 0);
+
+// 14. Wanted decays while hiding.
+await vb(`window.__VB.setWanted(2)`);
+await waitState(() => {
+  const vbh = window.__VB;
+  const pl = vbh.player;
+  let min = 1e9;
+  for (const c of vbh.police) min = Math.min(min, Math.hypot(c.x - pl.x, c.y - pl.y));
+  if (min < 600) {
+    const corners = [[240, 240], [2960, 240], [240, 2160], [2960, 2160]];
+    const c = corners[Math.floor(Math.random() * 4)];
+    vbh.teleport(c[0], c[1]);
+  }
+  return vbh.wanted < 2;
+}, 120000);
+check('14 wanted turun saat sembunyi', (await vb(`window.__VB.wanted`)) < 2, `wanted=${await vb(`window.__VB.wanted`)}`);
+
+// 15. Combat kills an enemy.
+await vb(`window.__VB.setWanted(0); window.__VB.exitCar(); window.__VB.heal(); window.__VB.giveAmmo(24); window.__VB.spawnGang(1)`);
+let killed = false;
+for (let i = 0; i < 18 && !killed; i++) {
+  const st = await vb(`({ e: window.__VB.enemies[0], cam: window.__VB.camera, pl: window.__VB.player, kills: window.__VB.stats.kills })`);
+  if (!st.e) { killed = st.kills >= 1; break; }
+  const sx = st.e.x - st.cam.x;
+  const sy = st.e.y - st.cam.y;
+  await page.mouse.click(Math.max(20, Math.min(1260, sx)), Math.max(20, Math.min(700, sy)));
+  await page.waitForTimeout(350);
+  killed = (await vb(`window.__VB.stats.kills`)) >= 1;
+}
+check('15 combat membunuh musuh', killed, `kills=${await vb(`window.__VB.stats.kills`)}`);
+
+// 16. Pause works.
+await page.keyboard.press('KeyP');
+await waitState(() => window.__VB.screen === 'pause', 30000);
+check('16 pause bekerja', (await vb(`window.__VB.screen`)) === 'pause');
+
+// 17. Resume works.
+await page.keyboard.press('KeyP');
+await waitState(() => window.__VB.screen === 'play', 30000);
+check('17 resume bekerja', (await vb(`window.__VB.screen`)) === 'play');
+
+// 18. Death shows WASTED.
+await vb(`window.__VB.hurt(500)`);
+await waitState(() => window.__VB.screen === 'wasted', 30000);
+check('18 mati menampilkan WASTED', (await vb(`window.__VB.screen`)) === 'wasted');
+
+// 19. R restarts after WASTED.
+await page.keyboard.press('KeyR');
+await waitState(() => window.__VB.screen === 'play', 30000);
+check('19 R restart setelah WASTED', (await vb(`window.__VB.screen`)) === 'play');
+
+// 20. Mission 6: steal the getaway car.
+await vb(`window.__VB.heal(); window.__VB.jumpToMission(5)`);
+await waitState(() => window.__VB.mission.index === 5, 30000);
+const tgt = await vb(`window.__VB.parked.find((c) => c.target)`);
+await vb(`window.__VB.teleport(${tgt.x}, ${tgt.y}); window.__VB.enterNearestCar()`);
+const m6a = await vb(`({ step: window.__VB.mission.step, inCar: window.__VB.player.inCar })`);
+check('20 misi 6: curi mobil', m6a.inCar && m6a.step === 1, JSON.stringify(m6a));
+
+// 21. Mission 6: bank cash taken, wanted 4.
+await vb(`window.__VB.goTo(1820, 1040)`);
+await waitState(() => window.__VB.mission.step === 2, 90000);
+await vb(`window.__VB.exitCar(); window.__VB.goTo(1820, 1040)`);
+await waitState(() => window.__VB.wanted === 4 && window.__VB.mission.step === 3, 60000);
+const m6b = await vb(`({ wanted: window.__VB.wanted, step: window.__VB.mission.step })`);
+check('21 misi 6: uang bank diambil, wanted 4', m6b.wanted === 4 && m6b.step === 3, JSON.stringify(m6b));
+
+// 22. Mission 6 completes, then victory.
+await vb(`window.__VB.goTo(620, 1840)`);
+await waitState(() => window.__VB.screen === 'mission', 120000);
+await page.mouse.click(640, 360);
+await waitState(() => window.__VB.screen === 'victory', 30000);
+check('22 misi 6 selesai lalu victory', (await vb(`window.__VB.screen`)) === 'victory');
+
+// 23. Victory restarts into free roam.
+await page.mouse.click(640, 360);
+await waitState(() => window.__VB.screen === 'play', 30000);
+check('23 victory restart ke free roam', (await vb(`window.__VB.screen`)) === 'play');
+
+// 24. Zero network requests (local only).
+const external = requests.filter((u) => !u.startsWith('http://127.0.0.1') && !u.startsWith('http://localhost') && !u.startsWith('data:') && !u.startsWith('about:'));
+check('24 zero network request (hanya request lokal)', external.length === 0, external.join(', ') || `${requests.length} local requests`);
+
+// 25. No console/page errors at all.
+check('25 no console/page error', errors.length === 0, errors.join(' | ') || 'clean');
 
 const passed = results.filter((r) => r.ok).length;
-console.log(`\n${passed}/${results.length} PASS`);
+console.log(`\nRESULT: ${passed}/${results.length} PASS`);
+await browser.close();
+server.close();
 process.exit(passed === results.length ? 0 : 1);

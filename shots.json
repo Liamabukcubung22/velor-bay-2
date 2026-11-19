@@ -1,1 +1,1 @@
-[{"name":"1-drive.jpg","query":"?shot=drive&seed=1"},{"name":"2-title.jpg","query":"?shot=title&seed=1"},{"name":"3-wanted.jpg","query":"?shot=wanted&seed=1"},{"name":"4-mission.jpg","query":"?shot=mission&seed=1"}]
+{"1-drive.jpg":"?shot=drive&seed=1","2-title.jpg":"?shot=title&seed=1","3-wanted.jpg":"?shot=wanted&seed=1","4-mission.jpg":"?shot=mission&seed=1"}
