@@ -6,7 +6,7 @@
 //
 // The output directory defaults to /output. Run it twice and the dossier
 // bytes must come out identical.
-import {cpSync, existsSync, mkdirSync, rmSync, writeFileSync, readdirSync} from 'node:fs';
+import { readdirSync, cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
@@ -23,8 +23,8 @@ const caps = {
 };
 
 mkdirSync(outDir, { recursive: true });
-for (const item of readdirSync(outDir)) {
-  rmSync(outDir + "/" + item, { recursive: true, force: true });
+for (const entry of readdirSync(outDir)) {
+  rmSync(`${outDir}/${entry}`, { recursive: true, force: true });
 }
 mkdirSync(join(outDir, 'game'), { recursive: true });
 mkdirSync(join(outDir, 'screenshots'), { recursive: true });
